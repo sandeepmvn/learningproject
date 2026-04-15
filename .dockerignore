@@ -1,0 +1,10 @@
+.pytest_cache/
+__pycache__/
+*.pyc
+.venv/
+expense_tracker.db
+tests/
+frontend/
+.git/
+.gitignore
+*.md
