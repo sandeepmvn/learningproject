@@ -1,6 +1,13 @@
+import os
+import secrets
+import logging
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from functools import lru_cache
 
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -8,6 +15,97 @@ from sqlalchemy.orm import Session, selectinload
 from app import models, schemas
 
 CENT = Decimal("0.01")
+ALGORITHM = "HS256"
+DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES = 30
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+FALLBACK_SECRET_KEY = secrets.token_urlsafe(32)
+logger = logging.getLogger(__name__)
+
+
+def get_access_token_expire_minutes() -> int:
+    value = os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", str(DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES))
+    try:
+        parsed = int(value)
+    except ValueError:
+        return DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES
+    return parsed if parsed > 0 else DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES
+
+
+@lru_cache(maxsize=1)
+def get_secret_key() -> str:
+    secret_key = os.getenv("JWT_SECRET_KEY")
+    if secret_key:
+        return secret_key
+    logger.warning(
+        "JWT_SECRET_KEY is not set. Using a process-local random key for development only; "
+        "set JWT_SECRET_KEY in production."
+    )
+    return FALLBACK_SECRET_KEY
+
+
+@lru_cache(maxsize=1)
+def get_dummy_password_hash() -> str:
+    return pwd_context.hash("dummy-password-for-timing-protection")
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def register_user(db: Session, payload: schemas.UserCreate) -> models.User:
+    existing = db.scalar(select(models.User).where(models.User.username == payload.username))
+    if existing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already registered")
+
+    user = models.User(
+        username=payload.username,
+        hashed_password=get_password_hash(payload.password),
+        is_active=True,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def authenticate_user(db: Session, username: str, password: str) -> models.User | None:
+    user = db.scalar(select(models.User).where(models.User.username == username))
+    hashed_password = user.hashed_password if user else get_dummy_password_hash()
+    password_is_valid = verify_password(password, hashed_password)
+    if not user or not password_is_valid or not user.is_active:
+        return None
+    return user
+
+
+def create_access_token(username: str, expires_delta_minutes: int | None = None) -> str:
+    expire_minutes = expires_delta_minutes or get_access_token_expire_minutes()
+    expire = datetime.now(timezone.utc) + timedelta(minutes=expire_minutes)
+    payload = {"sub": username, "exp": expire}
+    return jwt.encode(payload, get_secret_key(), algorithm=ALGORITHM)
+
+
+def get_user_by_token(db: Session, token: str) -> models.User:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, get_secret_key(), algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if not username:
+            raise credentials_exception
+    except JWTError as exc:
+        raise credentials_exception from exc
+
+    user = db.scalar(select(models.User).where(models.User.username == username))
+    if not user or not user.is_active:
+        raise credentials_exception
+    return user
 
 
 def to_money(value: Decimal | float | str) -> Decimal:
@@ -323,4 +421,3 @@ def build_trip_summary(trip: models.Trip) -> schemas.TripSummaryResponse:
         balances=balance_rows,
         settlements=settlements,
     )
-

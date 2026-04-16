@@ -88,14 +88,16 @@ See `DOCKER_DEPLOYMENT.md` for detailed Docker instructions.
 |--------|----------|-------------|
 | GET | `/` | API information |
 | GET | `/health` | Health check |
-| GET | `/trips` | List all trips |
-| POST | `/trips` | Create a trip |
-| GET | `/trips/{trip_id}` | Get trip details with participants and expenses |
-| GET | `/trips/{trip_id}/participants` | List trip participants |
-| POST | `/trips/{trip_id}/participants` | Add a participant |
-| GET | `/trips/{trip_id}/expenses` | List trip expenses |
-| POST | `/trips/{trip_id}/expenses` | Create an expense |
-| GET | `/trips/{trip_id}/summary` | Get balances and settlements |
+| POST | `/auth/register` | Register a user |
+| POST | `/auth/token` | Login and get Bearer token |
+| GET | `/trips` | List all trips (auth required) |
+| POST | `/trips` | Create a trip (auth required) |
+| GET | `/trips/{trip_id}` | Get trip details with participants and expenses (auth required) |
+| GET | `/trips/{trip_id}/participants` | List trip participants (auth required) |
+| POST | `/trips/{trip_id}/participants` | Add a participant (auth required) |
+| GET | `/trips/{trip_id}/expenses` | List trip expenses (auth required) |
+| POST | `/trips/{trip_id}/expenses` | Create an expense (auth required) |
+| GET | `/trips/{trip_id}/summary` | Get balances and settlements (auth required) |
 
 ### Example Usage
 
@@ -218,6 +220,8 @@ learningproject/
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DATABASE_URL` | Database connection string | `sqlite:///./expense_tracker.db` |
+| `JWT_SECRET_KEY` | Secret key used to sign JWT access tokens | process-local random key if not set (development only) |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | JWT access token expiration time in minutes | `30` |
 
 ### Database
 
