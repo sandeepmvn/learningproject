@@ -1,8 +1,11 @@
 from contextlib import asynccontextmanager
+from typing import Annotated
 
-from fastapi import Depends, FastAPI, status
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
+from app import models
 from app.database import Base, create_session_factory, get_database_url, get_db
 from app import schemas, services
 
@@ -25,6 +28,15 @@ def create_app(database_url: str | None = None) -> FastAPI:
         docs_url="/docs",
         lifespan=lifespan,
     )
+    oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
+
+    def get_current_user(
+        token: Annotated[str, Depends(oauth2_scheme)],
+        db: Session = Depends(get_db),
+    ) -> models.User:
+        return services.get_user_by_token(db, token)
+
+    CurrentUser = Annotated[models.User, Depends(get_current_user)]
 
     @app.get("/", response_model=schemas.APIInfo)
     def root() -> schemas.APIInfo:
@@ -38,21 +50,52 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def healthcheck() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.post("/auth/register", response_model=schemas.UserRead, status_code=status.HTTP_201_CREATED)
+    def register_user(payload: schemas.UserCreate, db: Session = Depends(get_db)) -> schemas.UserRead:
+        return services.register_user(db, payload)
+
+    @app.post("/auth/token", response_model=schemas.Token)
+    def login_for_access_token(
+        form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+        db: Session = Depends(get_db),
+    ) -> schemas.Token:
+        user = services.authenticate_user(db, form_data.username, form_data.password)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        access_token = services.create_access_token(username=user.username)
+        return schemas.Token(access_token=access_token, token_type="bearer")
+
     @app.get("/trips", response_model=list[schemas.TripResponse])
-    def list_trips(db: Session = Depends(get_db)) -> list[schemas.TripResponse]:
+    def list_trips(_current_user: CurrentUser, db: Session = Depends(get_db)) -> list[schemas.TripResponse]:
         return services.list_trips(db)
 
     @app.post("/trips", response_model=schemas.TripResponse, status_code=status.HTTP_201_CREATED)
-    def create_trip(payload: schemas.TripCreate, db: Session = Depends(get_db)) -> schemas.TripResponse:
+    def create_trip(
+        payload: schemas.TripCreate,
+        _current_user: CurrentUser,
+        db: Session = Depends(get_db),
+    ) -> schemas.TripResponse:
         return services.create_trip(db, payload)
 
     @app.get("/trips/{trip_id}", response_model=schemas.TripDetailResponse)
-    def get_trip(trip_id: int, db: Session = Depends(get_db)) -> schemas.TripDetailResponse:
+    def get_trip(
+        trip_id: int,
+        _current_user: CurrentUser,
+        db: Session = Depends(get_db),
+    ) -> schemas.TripDetailResponse:
         trip = services.get_trip_with_details_or_404(db, trip_id)
         return services.build_trip_detail_response(trip)
 
     @app.get("/trips/{trip_id}/participants", response_model=list[schemas.ParticipantResponse])
-    def list_participants(trip_id: int, db: Session = Depends(get_db)) -> list[schemas.ParticipantResponse]:
+    def list_participants(
+        trip_id: int,
+        _current_user: CurrentUser,
+        db: Session = Depends(get_db),
+    ) -> list[schemas.ParticipantResponse]:
         services.get_trip_or_404(db, trip_id)
         return services.get_trip_participants(db, trip_id)
 
@@ -64,12 +107,17 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def create_participant(
         trip_id: int,
         payload: schemas.ParticipantCreate,
+        _current_user: CurrentUser,
         db: Session = Depends(get_db),
     ) -> schemas.ParticipantResponse:
         return services.create_participant(db, trip_id, payload)
 
     @app.get("/trips/{trip_id}/expenses", response_model=list[schemas.ExpenseResponse])
-    def list_expenses(trip_id: int, db: Session = Depends(get_db)) -> list[schemas.ExpenseResponse]:
+    def list_expenses(
+        trip_id: int,
+        _current_user: CurrentUser,
+        db: Session = Depends(get_db),
+    ) -> list[schemas.ExpenseResponse]:
         return [services.serialize_expense(expense) for expense in services.list_expenses(db, trip_id)]
 
     @app.post(
@@ -80,13 +128,18 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def create_expense(
         trip_id: int,
         payload: schemas.ExpenseCreate,
+        _current_user: CurrentUser,
         db: Session = Depends(get_db),
     ) -> schemas.ExpenseResponse:
         expense = services.create_expense(db, trip_id, payload)
         return services.serialize_expense(expense)
 
     @app.get("/trips/{trip_id}/summary", response_model=schemas.TripSummaryResponse)
-    def get_trip_summary(trip_id: int, db: Session = Depends(get_db)) -> schemas.TripSummaryResponse:
+    def get_trip_summary(
+        trip_id: int,
+        _current_user: CurrentUser,
+        db: Session = Depends(get_db),
+    ) -> schemas.TripSummaryResponse:
         trip = services.get_trip_with_details_or_404(db, trip_id)
         return services.build_trip_summary(trip)
 
@@ -94,4 +147,3 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
 
 app = create_app()
-
