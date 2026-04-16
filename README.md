@@ -220,7 +220,7 @@ learningproject/
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DATABASE_URL` | Database connection string | `sqlite:///./expense_tracker.db` |
-| `JWT_SECRET_KEY` | Secret key used to sign JWT access tokens | `development-secret-key` |
+| `JWT_SECRET_KEY` | Secret key used to sign JWT access tokens | process-local random key if not set (development only) |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | JWT access token expiration time in minutes | `30` |
 
 ### Database

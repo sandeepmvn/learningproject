@@ -1,7 +1,10 @@
 import os
+import secrets
+import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from functools import lru_cache
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -15,6 +18,8 @@ CENT = Decimal("0.01")
 ALGORITHM = "HS256"
 DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES = 30
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+FALLBACK_SECRET_KEY = secrets.token_urlsafe(32)
+logger = logging.getLogger(__name__)
 
 
 def get_access_token_expire_minutes() -> int:
@@ -26,8 +31,21 @@ def get_access_token_expire_minutes() -> int:
     return parsed if parsed > 0 else DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES
 
 
+@lru_cache(maxsize=1)
 def get_secret_key() -> str:
-    return os.getenv("JWT_SECRET_KEY", "development-secret-key")
+    secret_key = os.getenv("JWT_SECRET_KEY")
+    if secret_key:
+        return secret_key
+    logger.warning(
+        "JWT_SECRET_KEY is not set. Using a process-local random key for development only; "
+        "set JWT_SECRET_KEY in production."
+    )
+    return FALLBACK_SECRET_KEY
+
+
+@lru_cache(maxsize=1)
+def get_dummy_password_hash() -> str:
+    return pwd_context.hash("dummy-password-for-timing-protection")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -56,7 +74,9 @@ def register_user(db: Session, payload: schemas.UserCreate) -> models.User:
 
 def authenticate_user(db: Session, username: str, password: str) -> models.User | None:
     user = db.scalar(select(models.User).where(models.User.username == username))
-    if not user or not verify_password(password, user.hashed_password):
+    hashed_password = user.hashed_password if user else get_dummy_password_hash()
+    password_is_valid = verify_password(password, hashed_password)
+    if not user or not password_is_valid or not user.is_active:
         return None
     return user
 
