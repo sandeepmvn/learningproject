@@ -4,14 +4,18 @@ from app.main import create_app
 from app import services
 
 
-def _auth_headers(client: TestClient, username: str = "tester", password: str = "strongpass123") -> dict[str, str]:
-    register_response = client.post("/auth/register", json={"username": username, "password": password})
-    assert register_response.status_code == 201
-
+def _login_headers(client: TestClient, username: str, password: str) -> dict[str, str]:
     token_response = client.post("/auth/token", data={"username": username, "password": password})
     assert token_response.status_code == 200
     token = token_response.json()["access_token"]
     return {"Authorization": f"Bearer {token}"}
+
+
+def _auth_headers(client: TestClient, username: str = "tester", password: str = "strongpass123") -> dict[str, str]:
+    register_response = client.post("/auth/register", json={"username": username, "password": password})
+    assert register_response.status_code == 201
+
+    return _login_headers(client, username, password)
 
 
 def test_trip_workflow_with_equal_split():
@@ -180,6 +184,7 @@ def test_register_login_and_invalid_login():
         assert register_response.status_code == 201
         assert register_response.json()["username"] == "alice"
         assert register_response.json()["is_active"] is True
+        assert register_response.json()["role"] == "traveler"
         assert "hashed_password" not in register_response.json()
 
         duplicate_response = client.post(
@@ -201,6 +206,66 @@ def test_register_login_and_invalid_login():
             data={"username": "alice", "password": "wrongpass123"},
         )
         assert invalid_login_response.status_code == 401
+
+
+def test_seeded_admin_can_view_users_and_manage_roles():
+    client = TestClient(create_app("sqlite+pysqlite:///:memory:"))
+
+    with client:
+        admin_headers = _login_headers(
+            client,
+            services.get_default_admin_username(),
+            services.get_default_admin_password(),
+        )
+        _auth_headers(client, username="traveler1")
+        second_traveler_headers = _auth_headers(client, username="traveler2")
+
+        me_response = client.get("/auth/me", headers=admin_headers)
+        assert me_response.status_code == 200
+        assert me_response.json()["username"] == services.get_default_admin_username()
+        assert me_response.json()["role"] == "admin"
+
+        roles_response = client.get("/roles", headers=admin_headers)
+        assert roles_response.status_code == 200
+        assert roles_response.json() == [{"name": "admin"}, {"name": "traveler"}]
+
+        users_response = client.get("/users", headers=admin_headers)
+        assert users_response.status_code == 200
+        usernames = {user["username"]: user["role"] for user in users_response.json()}
+        assert usernames[services.get_default_admin_username()] == "admin"
+        assert usernames["traveler1"] == "traveler"
+
+        unauthorized_users_response = client.get("/users", headers=second_traveler_headers)
+        assert unauthorized_users_response.status_code == 403
+
+        traveler_user = next(user for user in users_response.json() if user["username"] == "traveler1")
+        update_response = client.patch(
+            f"/users/{traveler_user['id']}/role",
+            json={"role": "admin"},
+            headers=admin_headers,
+        )
+        assert update_response.status_code == 200
+        assert update_response.json()["role"] == "admin"
+
+
+def test_cannot_remove_last_admin_role():
+    client = TestClient(create_app("sqlite+pysqlite:///:memory:"))
+
+    with client:
+        admin_headers = _login_headers(
+            client,
+            services.get_default_admin_username(),
+            services.get_default_admin_password(),
+        )
+        admin_user = client.get("/auth/me", headers=admin_headers).json()
+
+        demote_response = client.patch(
+            f"/users/{admin_user['id']}/role",
+            json={"role": "traveler"},
+            headers=admin_headers,
+        )
+        assert demote_response.status_code == 400
+        assert demote_response.json()["detail"] == "At least one admin user is required"
 
 
 def test_access_token_expiry_reads_environment_variable(monkeypatch):

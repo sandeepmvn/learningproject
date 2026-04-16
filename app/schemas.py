@@ -4,6 +4,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 
+RoleName = Literal["admin", "traveler"]
+
+
 class APIInfo(BaseModel):
     name: str
     version: str
@@ -21,6 +24,15 @@ class UserRead(BaseModel):
     id: int
     username: str
     is_active: bool
+    role: RoleName
+
+
+class UserRoleUpdate(BaseModel):
+    role: RoleName
+
+
+class RoleRead(BaseModel):
+    name: RoleName
 
 
 class Token(BaseModel):

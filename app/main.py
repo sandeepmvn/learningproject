@@ -19,6 +19,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         app.state.engine = engine
         app.state.SessionLocal = session_factory
         Base.metadata.create_all(bind=engine)
+        services.initialize_user_roles(engine, session_factory)
         yield
         engine.dispose()
 
@@ -37,6 +38,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
         return services.get_user_by_token(db, token)
 
     CurrentUser = Annotated[models.User, Depends(get_current_user)]
+
+    def get_current_admin_user(current_user: CurrentUser) -> models.User:
+        return services.require_admin(current_user)
+
+    CurrentAdminUser = Annotated[models.User, Depends(get_current_admin_user)]
 
     @app.get("/", response_model=schemas.APIInfo)
     def root() -> schemas.APIInfo:
@@ -68,6 +74,27 @@ def create_app(database_url: str | None = None) -> FastAPI:
             )
         access_token = services.create_access_token(username=user.username)
         return schemas.Token(access_token=access_token, token_type="bearer")
+
+    @app.get("/auth/me", response_model=schemas.UserRead)
+    def read_current_user(current_user: CurrentUser) -> schemas.UserRead:
+        return current_user
+
+    @app.get("/roles", response_model=list[schemas.RoleRead])
+    def list_available_roles(_current_user: CurrentUser) -> list[schemas.RoleRead]:
+        return [schemas.RoleRead(name=role_name) for role_name in services.list_roles()]
+
+    @app.get("/users", response_model=list[schemas.UserRead])
+    def list_users(_current_admin_user: CurrentAdminUser, db: Session = Depends(get_db)) -> list[schemas.UserRead]:
+        return services.list_users(db)
+
+    @app.patch("/users/{user_id}/role", response_model=schemas.UserRead)
+    def change_user_role(
+        user_id: int,
+        payload: schemas.UserRoleUpdate,
+        _current_admin_user: CurrentAdminUser,
+        db: Session = Depends(get_db),
+    ) -> schemas.UserRead:
+        return services.update_user_role(db, user_id, payload.role)
 
     @app.get("/trips", response_model=list[schemas.TripResponse])
     def list_trips(_current_user: CurrentUser, db: Session = Depends(get_db)) -> list[schemas.TripResponse]:

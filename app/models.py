@@ -14,6 +14,7 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     hashed_password: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(default=True)
+    role: Mapped[str] = mapped_column(String(20), default="traveler")
 
 
 class Trip(Base):

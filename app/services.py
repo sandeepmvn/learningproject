@@ -2,6 +2,7 @@ import os
 import secrets
 import logging
 from collections import defaultdict
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from functools import lru_cache
@@ -9,14 +10,17 @@ from functools import lru_cache
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi import HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import Engine, inspect, select, text
+from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from app import models, schemas
 
 CENT = Decimal("0.01")
 ALGORITHM = "HS256"
 DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ROLE_ADMIN = "admin"
+ROLE_TRAVELER = "traveler"
+ALLOWED_ROLES: Sequence[str] = (ROLE_ADMIN, ROLE_TRAVELER)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 FALLBACK_SECRET_KEY = secrets.token_urlsafe(32)
 logger = logging.getLogger(__name__)
@@ -56,6 +60,65 @@ def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 
+def get_default_admin_username() -> str:
+    return os.getenv("DEFAULT_ADMIN_USERNAME", ROLE_ADMIN)
+
+
+def get_default_admin_password() -> str:
+    return os.getenv("DEFAULT_ADMIN_PASSWORD", "Admin@123456")
+
+
+def list_roles() -> list[str]:
+    return list(ALLOWED_ROLES)
+
+
+def ensure_user_role_column(engine: Engine) -> None:
+    columns = {column["name"] for column in inspect(engine).get_columns("users")}
+    if "role" in columns:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(
+            text("ALTER TABLE users ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'traveler'")
+        )
+
+
+def seed_default_admin(db: Session) -> models.User:
+    username = get_default_admin_username()
+    password = get_default_admin_password()
+    admin_user = db.scalar(select(models.User).where(models.User.username == username))
+
+    if admin_user:
+        changed = False
+        if admin_user.role != ROLE_ADMIN:
+            admin_user.role = ROLE_ADMIN
+            changed = True
+        if not admin_user.is_active:
+            admin_user.is_active = True
+            changed = True
+        if changed:
+            db.commit()
+            db.refresh(admin_user)
+        return admin_user
+
+    admin_user = models.User(
+        username=username,
+        hashed_password=get_password_hash(password),
+        is_active=True,
+        role=ROLE_ADMIN,
+    )
+    db.add(admin_user)
+    db.commit()
+    db.refresh(admin_user)
+    return admin_user
+
+
+def initialize_user_roles(engine: Engine, session_factory: sessionmaker) -> None:
+    ensure_user_role_column(engine)
+    with session_factory() as db:
+        seed_default_admin(db)
+
+
 def register_user(db: Session, payload: schemas.UserCreate) -> models.User:
     existing = db.scalar(select(models.User).where(models.User.username == payload.username))
     if existing:
@@ -65,6 +128,7 @@ def register_user(db: Session, payload: schemas.UserCreate) -> models.User:
         username=payload.username,
         hashed_password=get_password_hash(payload.password),
         is_active=True,
+        role=ROLE_TRAVELER,
     )
     db.add(user)
     db.commit()
@@ -105,6 +169,44 @@ def get_user_by_token(db: Session, token: str) -> models.User:
     user = db.scalar(select(models.User).where(models.User.username == username))
     if not user or not user.is_active:
         raise credentials_exception
+    return user
+
+
+def require_admin(user: models.User) -> models.User:
+    if user.role != ROLE_ADMIN:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only admins can perform this action")
+    return user
+
+
+def get_user_or_404(db: Session, user_id: int) -> models.User:
+    user = db.scalar(select(models.User).where(models.User.id == user_id))
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    return user
+
+
+def list_users(db: Session) -> list[models.User]:
+    return list(db.scalars(select(models.User).order_by(models.User.id)))
+
+
+def count_admin_users(db: Session) -> int:
+    return sum(1 for user in db.scalars(select(models.User).where(models.User.role == ROLE_ADMIN)))
+
+
+def update_user_role(db: Session, user_id: int, role: schemas.RoleName) -> models.User:
+    user = get_user_or_404(db, user_id)
+    if user.role == role:
+        return user
+
+    if user.role == ROLE_ADMIN and role != ROLE_ADMIN and count_admin_users(db) == 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one admin user is required",
+        )
+
+    user.role = role
+    db.commit()
+    db.refresh(user)
     return user
 
 
